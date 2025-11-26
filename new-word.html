@@ -1,0 +1,375 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>意味のない言葉に意味を付けよう</title>
+<style>
+  :root{--bg:#0f1220;--fg:#e7ecff;--muted:#9aa3c7;--acc:#6ca0ff;--good:#2dd4bf;--bad:#f43f5e;--card:#171a2b;--card2:#1d2238;--green:#2dd4bf;--lightgreen:#8fffe0}
+  *{box-sizing:border-box} html,body{height:100%}
+  body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,"Hiragino Kaku Gothic ProN","Noto Sans JP",sans-serif;color:var(--fg);background:radial-gradient(1200px 600px at 10% -10%,#1e2544 0%,#0f1220 60%),var(--bg);display:flex;align-items:center;justify-content:center}
+  .wrap{width:96%;max-width:980px}
+  .card{background:linear-gradient(180deg,var(--card),var(--card2));border:1px solid #2a3156;border-radius:16px;box-shadow:0 10px 30px rgba(0,0,0,.25);padding:18px}
+  .title{font-weight:800;letter-spacing:.3px;font-size:20px;text-align:center;margin-bottom:6px}
+  .sub{color:var(--lightgreen);font-size:13px;text-align:center;margin-bottom:14px}
+  .panel{display:grid;grid-template-columns:1fr;gap:12px}
+  .madeup{font-size:40px;text-align:center;font-weight:900;letter-spacing:4px}
+  .timer{display:flex;justify-content:center;gap:10px;align-items:center}
+  .pill{background:#1f2747;padding:8px 10px;border-radius:999px;border:1px solid #2a3156;font-size:13px}
+  textarea{width:100%;min-height:120px;border-radius:12px;border:1px solid #2a3156;background:#0f142a;color:var(--fg);padding:12px;font-size:16px;outline:none}
+  textarea:focus{box-shadow:0 0 0 3px rgba(108,160,255,.25)}
+  .actions{display:flex;gap:10px;flex-wrap:wrap;justify-content:center}
+  button{cursor:pointer;background:linear-gradient(180deg,var(--green),#00b37d);color:white;border:none;padding:10px 16px;border-radius:10px;font-weight:700;letter-spacing:.3px}
+  button:disabled{opacity:.5;cursor:not-allowed}
+  .scores{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:6px}
+  .scoreBox{background:#131a36;border:1px solid #2a3156;border-radius:12px;padding:10px;text-align:center}
+  .scoreBox .v{font-size:26px;font-weight:900}
+  .comment{margin-top:14px;background:#0e1430;border:1px solid #2a3156;border-radius:12px;padding:12px}
+  .comment h4{margin:0 0 8px 0;font-size:13px;color:var(--muted)}
+  .aiText{font-size:14px;line-height:1.6;white-space:pre-wrap}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="card">
+    <div class="title">「意味のない言葉に意味を付けよう」</div>
+    <div class="sub">
+      あなたが考えた説明文を、「自然さ」と「独創性」でAIが採点します。<br>
+      100秒以内に意味を作って送信！<span style="font-weight:bold;">100点が最高得点(満点)</span>です。
+    </div>
+
+    <div class="panel">
+      <div class="madeup" id="madeup">—</div>
+      <div class="timer"><span class="pill">残り：<span id="remain">100.0</span>s</span></div>
+      <textarea id="input" placeholder="ここに“意味”を書いてください（例：○○とは、朝露のように儚い…）"></textarea>
+      <div class="actions">
+        <button id="btnStart" type="button">スタート</button>
+        <button id="btnSubmit" type="button" disabled>送信</button>
+        <button id="btnNext" type="button" style="display:none;">次の言葉</button>
+      </div>
+
+      <div class="scores">
+        <div class="scoreBox"><div>自然さ</div><div class="v" id="nat">—</div></div>
+        <div class="scoreBox"><div>独創性</div><div class="v" id="cre">—</div></div>
+        <div class="scoreBox"><div>合計（100点満点）</div><div class="v" id="tot">—</div></div>
+      </div>
+
+      <div class="actions" aria-label="共有">
+        <button id="nativeShare" type="button">共有</button>
+        <button id="shareX" type="button" aria-label="Xで共有">X</button>
+        <button id="shareFB" type="button" aria-label="Facebookで共有">Facebook</button>
+        <button id="shareLINE" type="button" aria-label="LINEで共有">LINE</button>
+        <button id="shareImage" type="button" aria-label="結果画像を共有">結果画像</button>
+        <button id="copyLink" type="button" aria-label="リンクをコピー">リンクコピー</button>
+      </div>
+
+      <div class="comment">
+        <h4>AIコメント</h4>
+        <div id="aiComment" class="aiText">プレイ後にコメントが表示されます。</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ゲーム本体スクリプト（フロントはAPIキーを持たない） -->
+<script>
+(() => {
+  const ROUND_TIME = 100.0;
+  const syllables = ['ア','イ','ウ','エ','オ','カ','キ','ク','ケ','コ','サ','シ','ス','セ','ソ','タ','チ','ツ','テ','ト','ナ','ニ','ヌ','ネ','ノ','ハ','ヒ','フ','ヘ','ホ','マ','ミ','ム','メ','モ','ヤ','ユ','ヨ','ラ','リ','ル','レ','ロ','ワ','ガ','ギ','グ','ゲ','ゴ','ザ','ジ','ズ','ゼ','ゾ','ダ','ヂ','ヅ','デ','ド','バ','ビ','ブ','ベ','ボ','パ','ピ','プ','ペ','ポ','ャ','ュ','ョ','ァ','ィ','ゥ','ェ','ォ'];
+  const badWords = ['エロ','死','殺','暴','下品'];
+
+  const $ = id => document.getElementById(id);
+  const ui = {
+    madeup: $('madeup'),
+    remain: $('remain'),
+    input: $('input'),
+    btnStart: $('btnStart'),
+    btnSubmit: $('btnSubmit'),
+    btnNext: $('btnNext'),
+    nat: $('nat'),
+    cre: $('cre'),
+    tot: $('tot'),
+    aiComment: $('aiComment')
+  };
+
+  const state = { phase: 'idle', timer: 0, word: '', tickId: 0 };
+
+  function genWord(){
+    const r = Math.random();
+    let len;
+    if (r < 0.85) len = randInt(3,5);
+    else if (r < 0.99) len = randInt(6,10);
+    else len = randInt(11,14);
+
+    let base = '';
+    for (let i = 0; i < len; i++){
+      let syl = syllables[Math.floor(Math.random() * syllables.length)];
+      if ((syl === 'ャ' || syl === 'ュ' || syl === 'ョ' || syl === 'ァ' || syl === 'ィ' || syl === 'ゥ' || syl === 'ェ' || syl === 'ォ') && base.length === 0) {
+        syl = 'ラ';
+      }
+      base += syl;
+    }
+    base = base.replace(/[ャュョ]{2,}/g,'ョ').replace(/[ァィゥェォ]{2,}/g,'ォ');
+    if (badWords.some(b => base.includes(b))) return genWord();
+
+    if (Math.random() < 0.30 && base.length >= 3){
+      const pos = randInt(1, base.length - 2);
+      if (base[pos] !== '・' && base[pos-1] !== '・' && base[pos+1] !== '・'){
+        base = base.slice(0, pos) + '・' + base.slice(pos);
+      }
+    }
+    if (base.startsWith('・') || base.endsWith('・') || base.includes('・・')){
+      return genWord();
+    }
+    return base;
+  }
+
+  function randInt(min, max){
+    return Math.floor(Math.random() * (max - min + 1)) + min;
+  }
+
+  function startRound(){
+    stopTimer();
+    state.word = genWord();
+    state.phase = 'running';
+    state.timer = ROUND_TIME;
+
+    ui.madeup.textContent = state.word;
+    ui.input.value = '';
+    ui.input.disabled = false;
+
+    ui.btnStart.style.display = 'none';
+    ui.btnNext.style.display = 'none';
+    ui.btnSubmit.style.display = 'none';
+    ui.btnSubmit.disabled = true;
+
+    ui.nat.textContent = '—';
+    ui.cre.textContent = '—';
+    ui.tot.textContent = '—';
+    ui.aiComment.textContent = 'プレイ後にコメントが表示されます。';
+
+    tick();
+    state.tickId = setInterval(tick, 100);
+    ui.input.focus();
+  }
+
+  function stopTimer(){
+    if (state.tickId){
+      clearInterval(state.tickId);
+      state.tickId = 0;
+    }
+  }
+
+  function tick(){
+    state.timer = Math.max(0, +(state.timer - 0.1).toFixed(1));
+    ui.remain.textContent = state.timer.toFixed(1);
+
+    if (state.timer <= 0){
+      submitNow();
+      return;
+    }
+
+    const hasText = ui.input.value.trim().length > 0;
+    ui.btnSubmit.style.display = hasText ? 'inline-block' : 'none';
+    ui.btnSubmit.disabled = !hasText;
+  }
+
+  async function apiEval(text, word){
+    const payload = { text, word };
+
+    const res = await fetch('/api/eval', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+
+    if (!res.ok){
+      throw new Error('API error: ' + res.status);
+    }
+
+    const data = await res.json();
+
+    const nat = typeof data.nat === 'number' ? data.nat : 0;
+    const cre = typeof data.cre === 'number' ? data.cre : 0;
+    const tot = typeof data.tot === 'number' ? data.tot : (nat + cre) / 2;
+
+    return {
+      nat,
+      cre,
+      tot,
+      comment: typeof data.comment === 'string'
+        ? data.comment
+        : 'コメントの取得に失敗しました。'
+    };
+  }
+
+  async function submitNow(){
+    if (state.phase !== 'running') return;
+
+    stopTimer();
+    state.phase = 'scored';
+    ui.input.disabled = true;
+
+    const val = ui.input.value.trim();
+    if (!val){
+      ui.nat.textContent = '0.0';
+      ui.cre.textContent = '0.0';
+      ui.tot.textContent = '0.0';
+      ui.aiComment.textContent = '何も書かれていないので評価できません。';
+      ui.btnSubmit.style.display = 'none';
+      ui.btnNext.style.display = 'inline-block';
+      ui.btnNext.disabled = false;
+      return;
+    }
+
+    ui.aiComment.textContent = 'AIが審査中…';
+
+    try {
+      const r = await apiEval(val, state.word);
+      ui.nat.textContent = r.nat.toFixed(1);
+      ui.cre.textContent = r.cre.toFixed(1);
+      ui.tot.textContent = r.tot.toFixed(1);
+      ui.aiComment.textContent = r.comment;
+    } catch (err){
+      console.error(err);
+      ui.nat.textContent = '—';
+      ui.cre.textContent = '—';
+      ui.tot.textContent = '—';
+      ui.aiComment.textContent = 'サーバー側でエラーが発生しました。時間をおいて再度お試しください。';
+    }
+
+    ui.btnSubmit.style.display = 'none';
+    ui.btnNext.style.display = 'inline-block';
+    ui.btnNext.disabled = false;
+  }
+
+  function nextWord(){
+    if (state.phase !== 'scored') return;
+    ui.btnNext.disabled = true;
+    ui.input.disabled = false;
+    startRound();
+  }
+
+  ui.btnStart.addEventListener('click', e => {
+    e.preventDefault();
+    startRound();
+  });
+
+  ui.btnSubmit.addEventListener('click', e => {
+    e.preventDefault();
+    submitNow();
+  });
+
+  ui.btnNext.addEventListener('click', e => {
+    e.preventDefault();
+    nextWord();
+  });
+
+  ui.input.addEventListener('keydown', e => {
+    if ((e.ctrlKey || e.metaKey) && e.key === 'Enter' &&
+        ui.btnSubmit.style.display !== 'none' && !ui.btnSubmit.disabled){
+      e.preventDefault();
+      submitNow();
+    }
+  });
+})();
+</script>
+
+<!-- 共有ボタン＋画像生成 -->
+<script>
+  function getShareData() {
+    const url   = location.href;
+    const title = document.title || "MyGame";
+    const word  = (document.getElementById('madeup')?.textContent || '—').trim();
+    const nat   = (document.getElementById('nat')?.textContent || '—').trim();
+    const cre   = (document.getElementById('cre')?.textContent || '—').trim();
+    const tot   = (document.getElementById('tot')?.textContent || '—').trim();
+    const hasScore = /^\\d/.test(tot);
+    const text = hasScore
+      ? `造語「${word}」の意味づけに挑戦！ 私のスコアは 合計${tot}点（自然さ${nat}・独創性${cre}）。あなたもやってみて！`
+      : `造語に意味をつける1分ゲーム。あなたも挑戦してみて！`;
+    return { url, title, text, word, nat, cre, tot };
+  }
+
+  // サイトのリンク共有（ネイティブ共有 or X等）
+  document.getElementById('nativeShare')?.addEventListener('click', async () => {
+    const { url, title, text } = getShareData();
+    if (navigator.share) {
+      try { await navigator.share({ title, text, url }); } catch(e) {}
+    } else {
+      shareToX();
+    }
+  });
+
+  function shareToX(){
+    const { url, text } = getShareData();
+    const xUrl = "https://twitter.com/intent/tweet?text=" + encodeURIComponent(text)
+               + "&url=" + encodeURIComponent(url)
+               + "&hashtags=" + encodeURIComponent("MyGame");
+    window.open(xUrl, "_blank", "noopener,noreferrer");
+  }
+
+  function shareToFacebook(){
+    const { url } = getShareData();
+    const fbUrl = "https://www.facebook.com/sharer/sharer.php?u=" + encodeURIComponent(url);
+    window.open(fbUrl, "_blank", "noopener,noreferrer");
+  }
+
+  function shareToLINE(){
+    const { url, text } = getShareData();
+    const lineUrl = "https://social-plugins.line.me/lineit/share?url=" + encodeURIComponent(url)
+                  + "&text=" + encodeURIComponent(text);
+    window.open(lineUrl, "_blank", "noopener,noreferrer");
+  }
+
+  document.getElementById('shareX')?.addEventListener('click', shareToX);
+  document.getElementById('shareFB')?.addEventListener('click', shareToFacebook);
+  document.getElementById('shareLINE')?.addEventListener('click', shareToLINE);
+
+  // 結果画像生成（キャンバスで画像を作って共有 or ダウンロード）
+  async function createResultImage() {
+    const { word, nat, cre, tot } = getShareData();
+
+    // スコアが出ていないときは作らない
+    if (!/^\\d/.test(tot)) {
+      alert("まずゲームをプレイして、スコアを出してください。");
+      return null;
+    }
+
+    const canvas = document.createElement('canvas');
+    const size = 800; // 正方形でLINEやXにも載せやすい
+    canvas.width = size;
+    canvas.height = size;
+    const ctx = canvas.getContext('2d');
+
+    // 背景グラデーション
+    const grad = ctx.createLinearGradient(0, 0, 0, size);
+    grad.addColorStop(0, "#1e2544");
+    grad.addColorStop(1, "#0f1220");
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, size, size);
+
+    // 枠カード
+    const margin = 40;
+    ctx.fillStyle = "rgba(10,15,40,0.9)";
+    ctx.strokeStyle = "rgba(120,160,255,0.6)";
+    ctx.lineWidth = 4;
+    ctx.beginPath();
+    ctx.roundRect(margin, margin, size - margin*2, size - margin*2, 30);
+    ctx.fill();
+    ctx.stroke();
+
+    ctx.textAlign = "center";
+    ctx.fillStyle = "#e7ecff";
+
+    // タイトル
+    ctx.font = "bold 32px 'Segoe UI', 'Noto Sans JP', system-ui";
+    ctx.fillText("意味のない言葉に意味を付けよう", size/2, margin + 60);
+
+    // 造語
+    ctx.font = "bold 60px 'Segoe UI', 'Noto Sans JP', system-ui";
+    ctx.fillStyle = "#8fffe0";
+    ctx.fillText(word || "—", size/2, margin + 140);
+
+    // スコア
+    ctx.fillStyle = "#e7e
