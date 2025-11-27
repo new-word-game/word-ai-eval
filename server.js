@@ -4,6 +4,16 @@ import OpenAI from "openai";
 
 const app = express();
 
+// --- 強制CORS & OPTIONS即返し（最強モード） ---
+app.use((req, res, next) => {
+  res.header("Access-Control-Allow-Origin", "*");
+  res.header("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+  res.header("Access-Control-Allow-Headers", "Content-Type");
+  if (req.method === "OPTIONS") return res.sendStatus(204);
+  next();
+});
+
+
 // APIキーは環境変数から読み取る（フロントには絶対渡さない）
 const client = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
