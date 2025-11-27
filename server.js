@@ -18,6 +18,10 @@ app.use(express.static(".")); // new-word.html などを同フォルダから配
 
 const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
+// 丸めユーティリティ（小数第1位）
+const round1 = (v) => Math.round((Number(v) || 0) * 10) / 10;
+const clamp = (v, min, max) => Math.max(min, Math.min(max, v));
+
 // -------------------------
 // /api/eval
 // -------------------------
@@ -35,17 +39,13 @@ app.post("/api/eval", async (req, res) => {
 2) 独創性 cre（0〜50）
 を採点し、合計 tot = nat + cre（0〜100）を算出してください。
 
-重要：
-- 「感想」だけを書きます。助言・提案・指示・改善案（〜した方が良い／〜すると良い等）は一切禁止。
-- 「点数にふさわしい」情緒のコメントにしてください。
-  - 低得点: 容赦ない辛口の感想（罵倒ではなく、あくまで“感じたこと”）
-  - 中間: 率直で淡々とした感想
-  - 高得点: 高揚感のある賞賛（比喩・断言・詩的表現OK）
-- コメントは2文以内。表現のバリエーションを広く（似通った言い回しを避ける）。絵文字は使っても使わなくても良い。
-- 平均はだいたい35点前後になりがちだが、作品に応じて自由に採点して良い（たまに高得点/低得点が出ても良い）。
-
-出力は JSON のみ。プロパティはこの4つだけ：
-{"nat": number, "cre": number, "tot": number, "comment": string}
+重要な厳守事項：
+- 「感想」だけを書く。助言・提案・指示・改善案は禁止（〜した方が良い 等は書かない）。
+- コメントは2文以内。表現のバリエーションを広く（似た言い回しを避ける）。絵文字は任意。
+- 各スコアは**必ず小数第1位まで**（例: 37.4）。**整数のみの出力は禁止**。
+- **tot は nat + cre を小数第1位で丸めた値**にすること（独自計算禁止）。
+- 出力は JSON のみ。プロパティはこの4つだけ：
+  {"nat": number, "cre": number, "tot": number, "comment": string}
 
 【造語】${word}
 【文章】${text}
@@ -69,24 +69,18 @@ app.post("/api/eval", async (req, res) => {
       return res.status(502).json({ error: "llm_parse_error", raw: content });
     }
 
-    // 値の整形と安全化
-    const clamp = (v, min, max) => Math.max(min, Math.min(max, Number(v) || 0));
-    let nat = clamp(parsed.nat, 0, 50);
-    let cre = clamp(parsed.cre, 0, 50);
-    let tot = clamp(parsed.tot, 0, 100);
+    // 値の整形（必ず0.1刻み＆範囲内に）
+    let nat = round1(clamp(parsed.nat, 0, 50));
+    let cre = round1(clamp(parsed.cre, 0, 50));
+    // 合計は nat+cre を正として再計算（0.1刻み）
+    let tot = round1(clamp(nat + cre, 0, 100));
     const comment = (parsed.comment || "").toString().trim();
 
-    // tot を nat+cre に合わせる（LLMの丸め誤差対策）
-    const sum = +(nat + cre).toFixed(1);
-    if (Math.abs(sum - tot) > 0.6) {
-      tot = sum; // 合計は nat+cre を正とする
-    }
-
     return res.json({
-      nat: +nat.toFixed(1),
-      cre: +cre.toFixed(1),
-      tot: +tot.toFixed(1),
-      comment // ← これだけをフロントで表示すればOK
+      nat,  // 0〜50（0.1刻み）
+      cre,  // 0〜50（0.1刻み）
+      tot,  // 0〜100（0.1刻み, nat+cre）
+      comment
     });
 
   } catch (err) {
