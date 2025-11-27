@@ -178,6 +178,12 @@ JSON 以外の文字・説明文・前置きは一切書かないでください
 });
 
 const PORT = process.env.PORT || 3000;
+
+app.get("/", (req, res) => {
+  res.type("text/plain").send("OK: word-ai-eval-service is running.");
+});
+
+
 app.listen(PORT, () => {
   console.log(`Server running → http://localhost:${PORT}`);
 });
