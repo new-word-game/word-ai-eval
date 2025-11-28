@@ -1,4 +1,21 @@
-// server.js
+// ============================================================================
+// Word AI Evaluation Service - Server
+// ============================================================================
+// 造語と文章を受け取り、AIによる採点とコメントを返すAPIサーバー
+// 
+// 主な機能:
+// - OpenAI APIを使用した自然さ・独創性の採点
+// - 得点に応じた動的なコメント生成（低得点=辛口、高得点=美辞麗句）
+// - スコアの偏り生成と端数処理によるバリエーション確保
+// 
+// エンドポイント:
+// - POST /api/eval : 採点リクエスト { text, word } → { nat, cre, tot, comment }
+// - GET /         : ヘルスチェック
+// ============================================================================
+// 履歴 
+// 25.11.28 cloud 平均点30点に調整,得点に応じたコメント長の動的変更,得点によるトーンの変更
+// ============================================================================
+
 import express from "express";
 import OpenAI from "openai";
 
@@ -76,15 +93,11 @@ function maybeSkewNatCre(natIn, creIn, p = 0.35) {
   let nat = round1(natIn), cre = round1(creIn);
   if (Math.random() >= p) return { nat, cre };
 
-  // どちらを上げるか
-  const raiseNat = Math.random() < 0.5;
-
-  // 取りうる最大Δ（範囲内で）
-  const maxAddNat = Math.min(50 - nat, cre);        // nat を上げる場合の最大
-  const maxAddCre = Math.min(50 - cre, nat);        // cre を上げる場合の最大
+  const raiseNat = Math.random() < 0.5; // どちらを上げるか
+  const maxAddNat = Math.min(50 - nat, cre);
+  const maxAddCre = Math.min(50 - cre, nat);
   const maxDelta  = raiseNat ? maxAddNat : maxAddCre;
 
-  // 最小3.0〜最大12.0の間で0.1刻み候補を作成（大きめの偏りも出る）
   const candidates = [];
   for (let d = 3.0; d <= 12.0; d += 0.1) {
     d = round1(d);
@@ -99,11 +112,27 @@ function maybeSkewNatCre(natIn, creIn, p = 0.35) {
   return { nat: clamp(nat, 0, 50), cre: clamp(cre, 0, 50) };
 }
 
-// コメント長を200字前後に（長すぎるときだけ軽くトリム）
-function tuneLength200(s, min = 160, max = 240) {
-  const t = (s || "").trim();
+// ★ NEW: 得点に応じたコメント長調整
+// 低得点（0-30）: 100-200字
+// 中得点（31-60）: 200-350字
+// 高得点（61-100）: 350-500字
+function tuneCommentByScore(comment, tot) {
+  const t = (comment || "").trim();
+  let min, max;
+  
+  if (tot <= 30) {
+    min = 100;
+    max = 200;
+  } else if (tot <= 60) {
+    min = 200;
+    max = 350;
+  } else {
+    min = 350;
+    max = 500;
+  }
+  
   if (t.length <= max) return t;
-  // 句点・読点・改行の直前で切れたらベター
+  
   const cut = t.slice(0, max);
   const idx = Math.max(cut.lastIndexOf("。"), cut.lastIndexOf("、"), cut.lastIndexOf("\n"));
   return (idx >= min ? cut.slice(0, idx + 1) : cut) + "…";
@@ -117,20 +146,27 @@ app.post("/api/eval", async (req, res) => {
       return res.status(400).json({ error: "text と word が必要です。" });
     }
 
+    // ★ MODIFIED: 平均30点、得点別トーン変更
     const prompt = `
-あなたは辛口かつユーモアのある審査員です。以下の作品を読み、
+あなたは厳格な審査員です。以下の作品を読み、
 1) 自然さ nat（0〜50）
 2) 独創性 cre（0〜50）
 を採点し、合計 tot = nat + cre（0〜100）を算出してください。
 
 厳守：
-- コメントは「感想」だけ。助言・提案・指示・改善案は禁止。
-- コメントは**200文字前後（目安160〜240字）**。情緒と比喩を自由に、罵倒はしない。
-- 各スコアは**必ず小数第1位**（例: 37.4）。**整数のみ禁止**。
+- 採点は**非常に厳格**。全体の平均は**総合30点前後**に収まるのが自然。**40以上は20%未満、60以上は5%未満、80以上は1%未満**の"稀"な評価とする。
+- スコアは**必ず小数第1位**（例: 27.3）。**整数のみ禁止**。
 - **.0 と .5 に偏らせない**（nat と cre のどちらかは .0/.5 以外の端数）。
 - **tot は nat + cre を小数第1位で丸めた値**。
 - ときどき **nat と cre に大きめの差**が出ても良い（偏り歓迎）。
-- 出力は JSON のみ：{"nat": number, "cre": number, "tot": number, "comment": string}
+
+【コメントのトーンと長さ】得点によって以下のように変える：
+- **0-30点（低得点）**: **辛辣でぼろくそに批評**。容赦なく欠点を指摘し、厳しい言葉で評価。ただし人格攻撃や侮辱はしない。**100-200字程度**。
+- **31-60点（中得点）**: 冷静かつ客観的。良い点と課題点をバランスよく。**200-350字程度**。
+- **61-100点（高得点）**: **美辞麗句を尽くして絶賛**。詩的で華やかな表現を使い、作品の素晴らしさを讃える。比喩や情緒的な言葉を多用。**350-500字程度**。
+
+コメントは「感想」のみ。助言・提案・指示・改善案は禁止。
+出力は **JSONのみ**：{"nat": number, "cre": number, "tot": number, "comment": string}
 
 【造語】${word}
 【文章】${text}
@@ -138,7 +174,7 @@ app.post("/api/eval", async (req, res) => {
 
     const response = await client.chat.completions.create({
       model: "gpt-4o-mini",
-      temperature: 1.25,
+      temperature: 1.25, // バリエーション重視
       response_format: { type: "json_object" },
       messages: [
         { role: "system", content: "日本語で応答。必ずJSONオブジェクトのみを返す。" },
@@ -167,8 +203,8 @@ app.post("/api/eval", async (req, res) => {
     // 5点吸着の回避
     ({ nat, cre, tot } = breakFiveStepTotal(nat, cre));
 
-    // コメント長を200字前後に調整（長すぎ対策のみ）
-    const comment = tuneLength200((parsed.comment || "").toString());
+    // ★ MODIFIED: 得点に応じたコメント長調整
+    const comment = tuneCommentByScore((parsed.comment || "").toString(), tot);
 
     return res.json({ nat, cre, tot, comment });
 
