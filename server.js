@@ -166,7 +166,12 @@ app.post("/api/eval", async (req, res) => {
 - **61-100点（高得点）**: **美辞麗句を尽くして絶賛**。詩的で華やかな表現を使い、作品の素晴らしさを讃える。比喩や情緒的な言葉を多用。**350-500字程度**。
 
 コメントは「感想」のみ。助言・提案・指示・改善案は禁止。
-出力は **JSONのみ**：{"nat": number, "cre": number, "tot": number, "comment": string}
+さらに、次も守ってください：
+- 入力された造語や文章が、意味を成さず、まともな内容として解釈できない場合（例：同じ文字の連打のみ、文章として成立していない断片だけなど）は、「解釈不能」と判断する。このとき nat と cre は 0〜5 点の範囲に収め、tot もそれに対応する低い値にする。
+- それ以外の普通の文章の場合は、通常どおり採点する。
+
+出力は **JSONのみ**：
+{"nat": number, "cre": number, "tot": number, "comment": string, "uninterpretable": boolean}
 
 【造語】${word}
 【文章】${text}
@@ -186,6 +191,19 @@ app.post("/api/eval", async (req, res) => {
     let parsed;
     try { parsed = JSON.parse(content); }
     catch { return res.status(502).json({ error: "llm_parse_error", raw: content }); }
+
+
+
+    // LLM が「解釈不能」と判定した場合は、ここで低得点＋専用コメントを返して終了
+    if (parsed.uninterpretable === true) {
+      const nat = round1(clamp(parsed.nat, 0, 5));
+      const cre = round1(clamp(parsed.cre, 0, 5));
+      const tot = round1(clamp(nat + cre, 0, 10));
+      const comment =
+        "入力された文章から一貫した意味や内容を読み取ることができませんでした。そのため、評価は低くなります。内容や意図が伝わるように、もう少し具体的に書き直してみてください。";
+      return res.json({ nat, cre, tot, comment });
+    }
+
 
     // 0.1刻み＆範囲
     let nat = round1(clamp(parsed.nat, 0, 50));
