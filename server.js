@@ -1,143 +1,3 @@
-// ============================================================================
-// Word AI Evaluation Service - Server
-// ============================================================================
-// 造語と文章を受け取り、AIによる採点とコメントを返すAPIサーバー
-// 
-// 主な機能:
-// - OpenAI APIを使用した自然さ・独創性の採点
-// - 得点に応じた動的なコメント生成（低得点=辛口、高得点=美辞麗句）
-// - スコアの偏り生成と端数処理によるバリエーション確保
-// 
-// エンドポイント:
-// - POST /api/eval : 採点リクエスト { text, word } → { nat, cre, tot, comment }
-// - GET /         : ヘルスチェック
-// ============================================================================
-// 履歴 
-// 25.11.28 cloud 平均点30点に調整,得点に応じたコメント長の動的変更,得点によるトーンの変更
-// ============================================================================
-
-import express from "express";
-import OpenAI from "openai";
-
-const app = express();
-
-// --- CORS & OPTIONS ---
-app.use((req, res, next) => {
-  res.header("Access-Control-Allow-Origin", "*");
-  res.header("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
-  res.header("Access-Control-Allow-Headers", "Content-Type");
-  if (req.method === "OPTIONS") return res.sendStatus(204);
-  next();
-});
-
-app.use(express.json());
-app.use(express.static(".")); // new-word.html などを同フォルダから配信
-
-const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-
-// ---------- ユーティリティ ----------
-const round1 = (v) => Math.round((Number(v) || 0) * 10) / 10;
-const clamp  = (v, min, max) => Math.max(min, Math.min(max, Number(v) || 0));
-const frac1  = (v) => Math.round((Math.abs(v) * 10) % 10); // 小数第1位(0..9)
-const is05   = (d) => d === 0 || d === 5;
-const pick   = (a) => a[Math.floor(Math.random() * a.length)];
-
-// 両方 .0/.5 → 端数を散らす（合計は維持）
-function dequantizeNatCre(natIn, creIn) {
-  let nat = round1(natIn);
-  let cre = round1(creIn);
-  if (is05(frac1(nat)) && is05(frac1(cre))) {
-    const deltas = [0.1, 0.2, 0.3, 0.4];
-    const tryShift = (dx) => {
-      const n2 = round1(nat + dx);
-      const c2 = round1(cre - dx);
-      if (n2 >= 0 && n2 <= 50 && c2 >= 0 && c2 <= 50) {
-        if (!(is05(frac1(n2)) && is05(frac1(c2)))) { nat = n2; cre = c2; return true; }
-      }
-      return false;
-    };
-    const d = pick(deltas);
-    if (!tryShift( d)) tryShift(-d);
-  }
-  return { nat, cre };
-}
-
-// tot が 5点刻みに吸着していたら、合計自体を±0.1〜0.4ずらす
-function breakFiveStepTotal(natIn, creIn) {
-  let nat = round1(natIn);
-  const cre = round1(creIn);
-  let tot = round1(nat + cre);
-
-  const isFiveStep = (t) => (Math.round(t * 10) % 50) === 0; // 25.0,30.0...判定
-  if (!isFiveStep(tot)) return { nat, cre, tot };
-
-  const deltas = [0.1, 0.2, 0.3, 0.4];
-  const tryNat = (dx) => {
-    const n2 = round1(nat + dx);
-    if (n2 < 0 || n2 > 50) return null;
-    if (is05(frac1(n2)) && is05(frac1(cre))) return null;
-    const t2 = round1(n2 + cre);
-    if ((Math.round(t2 * 10) % 50) !== 0) return { nat: n2, cre, tot: t2 };
-    return null;
-  };
-
-  for (const d of deltas.sort(() => Math.random() - 0.5)) {
-    const r1 = tryNat(+d); if (r1) return r1;
-    const r2 = tryNat(-d); if (r2) return r2;
-  }
-  return { nat, cre, tot };
-}
-
-// 時々デコボコ（偏り）を作る：確率 p で nat/cre に±Δを付与（合計は維持）
-function maybeSkewNatCre(natIn, creIn, p = 0.35) {
-  let nat = round1(natIn), cre = round1(creIn);
-  if (Math.random() >= p) return { nat, cre };
-
-  const raiseNat = Math.random() < 0.5; // どちらを上げるか
-  const maxAddNat = Math.min(50 - nat, cre);
-  const maxAddCre = Math.min(50 - cre, nat);
-  const maxDelta  = raiseNat ? maxAddNat : maxAddCre;
-
-  const candidates = [];
-  for (let d = 3.0; d <= 12.0; d += 0.1) {
-    d = round1(d);
-    if (d <= maxDelta) candidates.push(d);
-  }
-  if (!candidates.length) return { nat, cre };
-
-  const delta = pick(candidates);
-  if (raiseNat) { nat = round1(nat + delta); cre = round1(cre - delta); }
-  else          { cre = round1(cre + delta); nat = round1(nat - delta); }
-
-  return { nat: clamp(nat, 0, 50), cre: clamp(cre, 0, 50) };
-}
-
-// ★ NEW: 得点に応じたコメント長調整
-// 低得点（0-30）: 100-200字
-// 中得点（31-60）: 200-350字
-// 高得点（61-100）: 350-500字
-function tuneCommentByScore(comment, tot) {
-  const t = (comment || "").trim();
-  let min, max;
-  
-  if (tot <= 30) {
-    min = 100;
-    max = 200;
-  } else if (tot <= 60) {
-    min = 200;
-    max = 350;
-  } else {
-    min = 350;
-    max = 500;
-  }
-  
-  if (t.length <= max) return t;
-  
-  const cut = t.slice(0, max);
-  const idx = Math.max(cut.lastIndexOf("。"), cut.lastIndexOf("、"), cut.lastIndexOf("\n"));
-  return (idx >= min ? cut.slice(0, idx + 1) : cut) + "…";
-}
-
 // ------------------------- /api/eval -------------------------
 app.post("/api/eval", async (req, res) => {
   try {
@@ -146,15 +6,19 @@ app.post("/api/eval", async (req, res) => {
       return res.status(400).json({ error: "text と word が必要です。" });
     }
 
-    // ★ MODIFIED: 平均30点、得点別トーン変更
+    // ★ 修正版プロンプト：平均30〜40点・たまに70点以上も出る
     const prompt = `
-あなたは厳格な審査員です。以下の作品を読み、
+あなたは厳格だが公平な審査員です。以下の作品を読み、
 1) 自然さ nat（0〜50）
 2) 独創性 cre（0〜50）
 を採点し、合計 tot = nat + cre（0〜100）を算出してください。
 
 厳守：
-- 採点は**非常に厳格**。全体の平均は**総合20点前後**に収まるのが自然。**40以上は20%未満、60以上は5%未満、80以上は1%未満**の"稀"な評価とする。
+- 採点は**やや厳格**だが、不当に低得点に寄せない。
+- 全体の平均は**総合30〜40点程度**を目安とする。
+- **60点以上の作品は全体の5〜10%程度**出てよい。
+- **70点以上は1000回に数回程度（0.1〜0.5%程度）発生してよいレベルの“優れた作品”**とする。
+- **80点以上はごく稀だが、不可能ではない特別な評価**とする。
 - スコアは**必ず小数第1位**（例: 27.3）。**整数のみ禁止**。
 - **.0 と .5 に偏らせない**（nat と cre のどちらかは .0/.5 以外の端数）。
 - **tot は nat + cre を小数第1位で丸めた値**。
@@ -179,7 +43,8 @@ app.post("/api/eval", async (req, res) => {
 
     const response = await client.chat.completions.create({
       model: "gpt-4o-mini",
-      temperature: 1.25, // バリエーション重視
+      // ★ バリエーションをさらに出すために少し高め
+      temperature: 1.5,
       response_format: { type: "json_object" },
       messages: [
         { role: "system", content: "日本語で応答。必ずJSONオブジェクトのみを返す。" },
@@ -189,10 +54,11 @@ app.post("/api/eval", async (req, res) => {
 
     const content = response.choices[0]?.message?.content ?? "{}";
     let parsed;
-    try { parsed = JSON.parse(content); }
-    catch { return res.status(502).json({ error: "llm_parse_error", raw: content }); }
-
-
+    try {
+      parsed = JSON.parse(content);
+    } catch {
+      return res.status(502).json({ error: "llm_parse_error", raw: content });
+    }
 
     // LLM が「解釈不能」と判定した場合は、ここで低得点＋専用コメントを返して終了
     if (parsed.uninterpretable === true) {
@@ -204,12 +70,10 @@ app.post("/api/eval", async (req, res) => {
       return res.json({ nat, cre, tot, comment });
     }
 
-
     // 0.1刻み＆範囲
     let nat = round1(clamp(parsed.nat, 0, 50));
     let cre = round1(clamp(parsed.cre, 0, 50));
 
-    // 時々デコボコ（偏り）にする
     ({ nat, cre } = maybeSkewNatCre(nat, cre, 0.35));
 
     // 端数散らし（両方 .0/.5 の場合）
@@ -219,25 +83,14 @@ app.post("/api/eval", async (req, res) => {
     let tot = round1(clamp(nat + cre, 0, 100));
 
     // 5点吸着の回避
-    ({ nat, cre, tot } = breakFiveStepTotal(nat, cre));
+    ({ nat, cre, tot } = breakFiveStepTotal(nat, cre, tot));
 
-    // ★ MODIFIED: 得点に応じたコメント長調整
+    // 得点に応じたコメント長調整
     const comment = tuneCommentByScore((parsed.comment || "").toString(), tot);
 
     return res.json({ nat, cre, tot, comment });
-
   } catch (err) {
     console.error("API error:", err);
     res.status(500).json({ error: "internal_error" });
   }
-});
-
-// ping
-app.get("/", (req, res) => {
-  res.type("text/plain").send("OK: word-ai-eval-service is running.");
-});
-
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`Server running → http://localhost:${PORT}`);
 });
