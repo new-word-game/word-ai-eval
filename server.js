@@ -1,159 +1,289 @@
-// ------------------------- /api/eval -------------------------
+// ============================================================================
+// Word AI Evaluation Service - 完全版（高得点確率制御 + 日本語文章チェック + 下限保証）
+// ============================================================================
+
+import express from "express";
+import OpenAI from "openai";
+
+const app = express();
+
+app.use((req, res, next) => {
+  res.header("Access-Control-Allow-Origin", "*");
+  res.header("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+  res.header("Access-Control-Allow-Headers", "Content-Type");
+  if (req.method === "OPTIONS") return res.sendStatus(204);
+  next();
+});
+
+app.use(express.json());
+app.use(express.static("."));
+
+const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
+// ---------- Utility ----------
+const round1 = (v) => Math.round((Number(v) || 0) * 10) / 10;
+const clamp = (v, min, max) => Math.max(min, Math.min(max, Number(v) || 0));
+const frac1 = (v) => Math.round((Math.abs(v) * 10) % 10);
+const is05 = (d) => d === 0 || d === 5;
+const pick = (a) => a[Math.floor(Math.random() * a.length)];
+
+function dequantizeNatCre(natIn, creIn) {
+  let nat = round1(natIn);
+  let cre = round1(creIn);
+  if (is05(frac1(nat)) && is05(frac1(cre))) {
+    const deltas = [0.1, 0.2, 0.3, 0.4];
+    const tryShift = (dx) => {
+      const n2 = round1(nat + dx);
+      const c2 = round1(cre - dx);
+      if (n2 >= 0 && n2 <= 50 && c2 >= 0 && c2 <= 50) {
+        if (!(is05(frac1(n2)) && is05(frac1(c2)))) {
+          nat = n2;
+          cre = c2;
+          return true;
+        }
+      }
+      return false;
+    };
+    const d = pick(deltas);
+    if (!tryShift(d)) tryShift(-d);
+  }
+  return { nat, cre };
+}
+
+function breakFiveStepTotal(natIn, creIn) {
+  let nat = round1(natIn);
+  const cre = round1(creIn);
+  let tot = round1(nat + cre);
+
+  const isFiveStep = (t) => (Math.round(t * 10) % 50) === 0;
+  if (!isFiveStep(tot)) return { nat, cre, tot };
+
+  const deltas = [0.1, 0.2, 0.3, 0.4];
+  const tryNat = (dx) => {
+    const n2 = round1(nat + dx);
+    if (n2 < 0 || n2 > 50) return null;
+    if (is05(frac1(n2)) && is05(frac1(cre))) return null;
+    const t2 = round1(n2 + cre);
+    if (!isFiveStep(t2)) return { nat: n2, cre, tot: t2 };
+    return null;
+  };
+
+  for (const d of deltas.sort(() => Math.random() - 0.5)) {
+    const r1 = tryNat(+d);
+    if (r1) return r1;
+    const r2 = tryNat(-d);
+    if (r2) return r2;
+  }
+  return { nat, cre, tot };
+}
+
+function maybeSkewNatCre(natIn, creIn, p = 0.2) {
+  let nat = round1(natIn),
+    cre = round1(creIn);
+  if (Math.random() >= p) return { nat, cre };
+
+  const raiseNat = Math.random() < 0.5;
+  const maxAddNat = Math.min(50 - nat, cre);
+  const maxAddCre = Math.min(50 - cre, nat);
+  const maxDelta = raiseNat ? maxAddNat : maxAddCre;
+
+  const candidates = [];
+  for (let d = 3.0; d <= 10.0; d += 0.1) {
+    d = round1(d);
+    if (d <= maxDelta) candidates.push(d);
+  }
+  if (!candidates.length) return { nat, cre };
+
+  const delta = pick(candidates);
+  if (raiseNat) {
+    nat = round1(nat + delta);
+    cre = round1(cre - delta);
+  } else {
+    cre = round1(cre + delta);
+    nat = round1(nat - delta);
+  }
+
+  return { nat: clamp(nat, 0, 50), cre: clamp(cre, 0, 50) };
+}
+
+function tuneCommentByScore(comment, tot) {
+  const t = (comment || "").trim();
+  let min, max;
+
+  if (tot <= 30) {
+    min = 100;
+    max = 200;
+  } else if (tot <= 60) {
+    min = 200;
+    max = 350;
+  } else {
+    min = 350;
+    max = 500;
+  }
+
+  if (t.length <= max) return t;
+
+  const cut = t.slice(0, max);
+  const idx = Math.max(
+    cut.lastIndexOf("。"),
+    cut.lastIndexOf("、"),
+    cut.lastIndexOf("\n")
+  );
+  return (idx >= min ? cut.slice(0, idx + 1) : cut) + "…";
+}
+
+// ---------- ★ 日本語らしい文章かどうかの簡易チェック ----------
+function isLikelyGoodJapaneseSentence(text) {
+  const s = (text || "").trim();
+  if (s.length < 30) return false;
+
+  const jpChars = s.match(/[\u3040-\u30FF\u4E00-\u9FFF]/g) || [];
+  if (jpChars.length < 10) return false;
+
+  const hasPunct = /[。！？!?]/.test(s);
+  return hasPunct;
+}
 
 // ------------------------- /api/eval -------------------------
 app.post("/api/eval", async (req, res) => {
   try {
     const { text, word } = req.body || {};
-    if (!text || !word) {
-      return res.status(400).json({ error: "text と word が必要です。" });
-    }
-
-
-
+    if (!text || !word) return res.status(400).json({ error: "text と word が必要です。" });
 
     const prompt = `
-あなたは厳格だが公平な審査員です。以下の作品を読み、
-1) 自然さ nat（0〜50）
-2) 独創性 cre（0〜50）
-を採点し、合計 tot = nat + cre（0〜100）を算出してください。
+あなたは日本語文章の審査員です。以下の作品を読み、
+自然さ nat（0〜50）、独創性 cre（0〜50）を採点し、tot = nat + cre を算出。
 
-【全体の分布ルール】
-- 採点は**やや厳格**だが、不当に低得点に寄せない。
-- 全体の平均は**総合30〜40点程度**を目安とする。
-- **60点以上の作品は全体の5〜10%程度**出てよい。
-- **70点以上は1000回に数回程度（0.1〜0.5%程度）発生してよいレベルの“優れた作品”**とする。
-- **80点以上はごく稀だが、不可能ではない特別な評価**とする。
+【造語】
+意味は元々ないものとする。説明文と因果関係は不要。
 
-【スコア表現のルール】
-- スコアは**必ず小数第1位**（例: 27.3）。**整数のみは禁止**。
-- **.0 と .5 に偏らせない**（nat と cre のどちらかは .0/.5 以外の端数にする）。
-- **tot は nat + cre を小数第1位で丸めた値**。
-- ときどき **nat と cre に大きめの差**が出ても良い（偏り歓迎）。
+【評価基準】
+- 日本語として読めるなら OK（内容は無関係でもよい）
+- nat/cre は文章そのものの自然さ・独自性で判断
+- スコアは必ず小数第1位（整数禁止）
+- コメントは感想のみ（助言禁止）
 
-【造語と説明文の関係について】
-- ここで扱う「造語」には、もともと明確な意味はないものと仮定する。
-- 説明文が、その造語の意味や由来を論理的・因果的に説明している必要は**まったくない**。
-- 説明文が「日本語として文法的に成立している」「おおまかな内容や情景が読める」のであれば、
-  それだけで**評価対象として十分な文章**とみなす。
-- 造語と無関係なテーマの文章であってもよい。その場合は、
-  「日本語としての自然さ」「表現の豊かさ・独自性」に基づいて nat / cre を評価する。
-
-【文章の質と下限スコアの関係】
-- 次の条件を満たす場合、「きちんと内容が書かれている普通の文章」とみなす：
-  - 日本語として文法的におおむね成立している（主語と述語の対応などが完全に崩壊していない）。
-  - 全体として何について書かれているかが理解できる（話題や状況がイメージできる）。
-  - 同じ語の連打や無意味な記号列のみではなく、複数の語句から構成されている。
-- この「きちんとした普通の文章」に対しては、原則として以下を守ること：
-  - **合計 tot を 10点未満にはしない。**
-  - よほど稚拙でちぐはぐな内容でない限り、**tot は 20点前後〜40点台に収まりやすくする。**
-  - 明らかに平均的な出来の文章なら、**tot 30〜50点程度**を目安とする。
-- **内容が荒唐無稽であっても、造語と無関係であっても、日本語として読めるなら「解釈不能」とはみなさない。**
-
-【解釈不能の扱い】
-- 次のような場合のみ、「解釈不能」と判断する：
-  - 同じ文字・記号の連打が大部分を占め、文としての構造がほとんどない。
-  - 単語や文節の断片がバラバラに並んでいるだけで、文としてつながっていない。
-  - 全体の文字数が非常に少なく（目安として10文字未満）、話題や内容を読み取ることがほぼ不可能である。
-- 「解釈不能」と判断した場合：
-  - nat と cre は 0〜5 点の範囲に収め、tot もそれに対応する低い値にする。
-- それ以外の、ある程度の長さがあり、日本語の文章として成立しているものについては、
-  たとえ内容が奇妙であっても「解釈不能」とはせず、通常どおり採点する。
-
-【コメントのトーンと長さ】得点によって以下のように変える：
-- **0-30点（低得点）**: **辛辣でぼろくそに批評**。容赦なく欠点を指摘し、厳しい言葉で評価。ただし人格攻撃や侮辱はしない。**100-200字程度**。
-- **31-60点（中得点）**: 冷静かつ客観的。良い点と課題点をバランスよく。**200-350字程度**。
-- **61-100点（高得点）**: **美辞麗句を尽くして絶賛**。詩的で華やかな表現を使い、作品の素晴らしさを讃える。比喩や情緒的な言葉を多用。**350-500字程度**。
-
-コメントは「感想」のみ。助言・提案・指示・改善案は禁止。
-
-出力は **JSONのみ**：
-{"nat": number, "cre": number, "tot": number, "comment": string, "uninterpretable": boolean}
+JSON 形式：
+{"nat": number, "cre": number, "tot": number, "comment": string}
 
 【造語】${word}
 【文章】${text}
 `.trim();
 
-
-
-
-
     const response = await client.chat.completions.create({
       model: "gpt-4o-mini",
-      temperature: 1.5,
+      temperature: 1.3,
       response_format: { type: "json_object" },
       messages: [
-        { role: "system", content: "日本語で応答。必ずJSONオブジェクトのみを返す。" },
-        { role: "user", content: prompt }
+        { role: "system", content: "日本語で応答。JSON のみ返す。" },
+        { role: "user", content: prompt },
       ],
     });
 
-    const content = response.choices[0]?.message?.content ?? "{}";
     let parsed;
     try {
-      parsed = JSON.parse(content);
+      parsed = JSON.parse(response.choices[0]?.message?.content ?? "{}");
     } catch {
-      return res.status(502).json({ error: "llm_parse_error", raw: content });
+      return res.status(502).json({ error: "llm_parse_error" });
     }
 
     const textLen = (text || "").trim().length;
 
-    // ---------------- 解釈不能ルート ----------------
-    // LLM が uninterpretable=true を出してきても、
-    // ある程度の長さがある文章なら「解釈不能」とは扱わない。
-    if (parsed.uninterpretable === true && textLen < 15) {
-      const nat = round1(clamp(parsed.nat, 0, 5));
-      const cre = round1(clamp(parsed.cre, 0, 5));
-      const tot = round1(clamp(nat + cre, 0, 10));
-      const comment =
-        "入力された文章から一貫した意味や内容を読み取ることができませんでした。そのため、評価は低くなります。内容や意図が伝わるように、もう少し具体的に書き直してみてください。";
-      return res.json({ nat, cre, tot, comment });
-    }
-
-    // ---------------- 通常ルート ----------------
-    // 0.1刻み＆範囲
+    // ---------- LLM 出力整形 ----------
     let nat = round1(clamp(parsed.nat, 0, 50));
     let cre = round1(clamp(parsed.cre, 0, 50));
 
-    // ★ 第1段階：LLM が極端に低く出してきた場合のソフト底上げ
-    let totRaw = round1(clamp(nat + cre, 0, 100));
-    if (textLen >= 10 && totRaw < 20) {
-      const bump = 20 - totRaw; // 合計が20になるように増やす
-      const addNat = Math.min(bump / 2, 50 - nat);
-      const addCre = Math.min(bump - addNat, 50 - cre);
-      nat = round1(clamp(nat + addNat, 0, 50));
-      cre = round1(clamp(cre + addCre, 0, 50));
-      totRaw = round1(clamp(nat + cre, 0, 100));
-    }
-
-    // 時々デコボコ（偏り）にする（合計は維持される）
-    ({ nat, cre } = maybeSkewNatCre(nat, cre, 0.15));
-
-    // 端数散らし（両方 .0/.5 の場合）
+    ({ nat, cre } = maybeSkewNatCre(nat, cre, 0.2));
     ({ nat, cre } = dequantizeNatCre(nat, cre));
 
-    // 合計（0.1刻み）
     let tot = round1(clamp(nat + cre, 0, 100));
+    ({ nat, cre, tot } = breakFiveStepTotal(nat, cre));
 
-    // 5点吸着の回避
-    ({ nat, cre, tot } = breakFiveStepTotal(nat, cre, tot));
+    // ---------- 下限点（短文でも一桁にならない） ----------
+    let minTot = 0;
+    if (textLen >= 5 && textLen < 20) minTot = 10;
+    else if (textLen >= 20 && textLen < 60) minTot = 20;
+    else if (textLen >= 60) minTot = 30;
 
-    // ★ 第2段階：最終的なハード下限（ここで完全に止めを刺す）
-    if (textLen >= 10 && tot < 20) {
-      const bump2 = 20 - tot;
-      const addNat2 = Math.min(bump2 / 2, 50 - nat);
-      const addCre2 = Math.min(bump2 - addNat2, 50 - cre);
-      nat = round1(clamp(nat + addNat2, 0, 50));
-      cre = round1(clamp(cre + addCre2, 0, 50));
+    if (minTot > 0 && tot < minTot) {
+      const diff = minTot - tot;
+      const base = nat + cre;
+      const share = base > 0 ? nat / base : 0.5;
+      nat = round1(clamp(nat + diff * share, 0, 50));
+      cre = round1(clamp(cre + diff * (1 - share), 0, 50));
       tot = round1(clamp(nat + cre, 0, 100));
     }
 
-    // 得点に応じたコメント長調整
-    const comment = tuneCommentByScore((parsed.comment || "").toString(), tot);
+    // ---------- ★ 高得点確率ゲート（日本語の文章だけ対象） ----------
+    const canUseLuckyGate = isLikelyGoodJapaneseSentence(text);
 
+    if (canUseLuckyGate) {
+      const r = Math.random();
+      const p90 = 1 / 5000;
+      const p70 = 1 / 1000;
+      const p50 = 1 / 30;
+
+      let tier = null;
+      if (r < p90) tier = "90";
+      else if (r < p70) tier = "70";
+      else if (r < p50) tier = "50";
+
+      if (tier) {
+        let minT, maxT;
+        if (tier === "90") {
+          minT = 90;
+          maxT = 100;
+        } else if (tier === "70") {
+          minT = 70;
+          maxT = 90;
+        } else {
+          minT = 50;
+          maxT = 70;
+        }
+
+        const targetTot = round1(minT + Math.random() * (maxT - minT - 0.1));
+        const natMin = Math.max(0, targetTot - 50);
+        const natMax = Math.min(50, targetTot);
+        let natNew = round1(natMin + Math.random() * (natMax - natMin));
+        let creNew = round1(targetTot - natNew);
+
+        nat = natNew;
+        cre = creNew;
+        tot = round1(nat + cre);
+      } else {
+        if (tot > 50) {
+          const scale = 49.9 / tot;
+          nat = round1(nat * scale);
+          cre = round1(cre * scale);
+          tot = round1(nat + cre);
+        }
+      }
+    } else {
+      // 日本語として成立していない → 高得点禁止
+      if (tot > 50) {
+        const scale = 49.9 / tot;
+        nat = round1(nat * scale);
+        cre = round1(cre * scale);
+        tot = round1(nat + cre);
+      }
+    }
+
+    const comment = tuneCommentByScore(parsed.comment || "", tot);
     return res.json({ nat, cre, tot, comment });
+
   } catch (err) {
     console.error("API error:", err);
-    res.status(500).json({ error: "internal_error" });
+    return res.status(500).json({ error: "internal_error" });
   }
 });
 
+// ----------- ping -----------
+app.get("/", (req, res) => {
+  res.type("text/plain").send("OK: word-ai-eval-service is running.");
+});
+
+// ----------- start -----------
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`Server running → http://localhost:${PORT}`);
+});
