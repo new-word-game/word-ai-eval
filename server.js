@@ -1,12 +1,12 @@
 // ------------------------- /api/eval -------------------------
+
+// ------------------------- /api/eval -------------------------
 app.post("/api/eval", async (req, res) => {
   try {
     const { text, word } = req.body || {};
     if (!text || !word) {
       return res.status(400).json({ error: "text と word が必要です。" });
     }
-
-    // ★ 修正版プロンプト：平均30〜40点・たまに70点以上も出る
 
     const prompt = `
 あなたは厳格だが公平な審査員です。以下の作品を読み、
@@ -29,8 +29,8 @@ app.post("/api/eval", async (req, res) => {
 
 【文章の質と下限スコアの関係】
 - 次の条件を満たす場合、「きちんと内容が書かれている普通の文章」とみなす：
-  - 文としておおむね文法的に成立している（主語と述語の対応などが崩壊していない）。
-  - 全体として何について書かれているかが理解できる（テーマや話題が分かる）。
+  - 文としておおむね文法的に成立している。
+  - 全体として何について書かれているかが理解できる。
   - 同じ語の連打や意味不明な記号列のみではない。
 - この「きちんとした普通の文章」に対しては、原則として以下を守ること：
   - **合計 tot を 10点未満にはしない。**
@@ -41,7 +41,7 @@ app.post("/api/eval", async (req, res) => {
 【解釈不能の扱い】
 - 入力された造語や文章が、意味を成さず、まともな内容として解釈できない場合（例：同じ文字の連打のみ、文章として成立していない断片だけなど）は、「解釈不能」と判断する。
   - このとき nat と cre は 0〜5 点の範囲に収め、tot もそれに対応する低い値にする。
-- それ以外の、テーマや内容が理解できる普通の文章の場合は、「解釈不能」とはせず、上記の下限ルールにしたがって通常どおり採点する。
+- ただし、**全体の文字数が15文字以上あり、内容やテーマが読み取れる場合は「解釈不能」とはみなさないこと。**
 
 【コメントのトーンと長さ】得点によって以下のように変える：
 - **0-30点（低得点）**: **辛辣でぼろくそに批評**。容赦なく欠点を指摘し、厳しい言葉で評価。ただし人格攻撃や侮辱はしない。**100-200字程度**。
@@ -59,7 +59,6 @@ app.post("/api/eval", async (req, res) => {
 
     const response = await client.chat.completions.create({
       model: "gpt-4o-mini",
-      // ★ バリエーションをさらに出すために少し高め
       temperature: 1.5,
       response_format: { type: "json_object" },
       messages: [
@@ -76,8 +75,12 @@ app.post("/api/eval", async (req, res) => {
       return res.status(502).json({ error: "llm_parse_error", raw: content });
     }
 
-    // LLM が「解釈不能」と判定した場合は、ここで低得点＋専用コメントを返して終了
-    if (parsed.uninterpretable === true) {
+    const textLen = (text || "").trim().length;
+
+    // ---------------- 解釈不能ルート ----------------
+    // LLM が uninterpretable=true を出してきても、
+    // ある程度の長さがある文章なら「解釈不能」とは扱わない。
+    if (parsed.uninterpretable === true && textLen < 15) {
       const nat = round1(clamp(parsed.nat, 0, 5));
       const cre = round1(clamp(parsed.cre, 0, 5));
       const tot = round1(clamp(nat + cre, 0, 10));
@@ -86,29 +89,24 @@ app.post("/api/eval", async (req, res) => {
       return res.json({ nat, cre, tot, comment });
     }
 
-
-
+    // ---------------- 通常ルート ----------------
     // 0.1刻み＆範囲
     let nat = round1(clamp(parsed.nat, 0, 50));
     let cre = round1(clamp(parsed.cre, 0, 50));
 
-    // ★ 保険：それなりの長さの文章なのに合計が極端に低い場合は底上げ
-    const textLen = (text || "").trim().length;
+    // ★ 第1段階：LLM が極端に低く出してきた場合のソフト底上げ
     let totRaw = round1(clamp(nat + cre, 0, 100));
-
-    // 条件はお好みで調整可：
-    // - textLen >= 40 : 40文字以上なら「一応ちゃんと書いている」
-    // - totRaw < 20   : 合計20点を最低ラインにする
-    if (textLen >= 40 && totRaw < 20) {
+    if (textLen >= 10 && totRaw < 20) {
       const bump = 20 - totRaw; // 合計が20になるように増やす
-      nat = round1(clamp(nat + bump / 2, 0, 50));
-      cre = round1(clamp(cre + bump / 2, 0, 50));
-      totRaw = round1(clamp(nat + cre, 0, 100)); // 一応更新
+      const addNat = Math.min(bump / 2, 50 - nat);
+      const addCre = Math.min(bump - addNat, 50 - cre);
+      nat = round1(clamp(nat + addNat, 0, 50));
+      cre = round1(clamp(cre + addCre, 0, 50));
+      totRaw = round1(clamp(nat + cre, 0, 100));
     }
 
-    // ここから先は今まで通り
-    // 時々デコボコ（偏り）にする
-    ({ nat, cre } = maybeSkewNatCre(nat, cre, 0.20)); // pは厳しめなら0.15くらい推奨
+    // 時々デコボコ（偏り）にする（合計は維持される）
+    ({ nat, cre } = maybeSkewNatCre(nat, cre, 0.15));
 
     // 端数散らし（両方 .0/.5 の場合）
     ({ nat, cre } = dequantizeNatCre(nat, cre));
@@ -117,11 +115,17 @@ app.post("/api/eval", async (req, res) => {
     let tot = round1(clamp(nat + cre, 0, 100));
 
     // 5点吸着の回避
-    ({ nat, cre, tot } = breakFiveStepTotal(nat, cre));
-
-
-    // 5点吸着の回避
     ({ nat, cre, tot } = breakFiveStepTotal(nat, cre, tot));
+
+    // ★ 第2段階：最終的なハード下限（ここで完全に止めを刺す）
+    if (textLen >= 10 && tot < 20) {
+      const bump2 = 20 - tot;
+      const addNat2 = Math.min(bump2 / 2, 50 - nat);
+      const addCre2 = Math.min(bump2 - addNat2, 50 - cre);
+      nat = round1(clamp(nat + addNat2, 0, 50));
+      cre = round1(clamp(cre + addCre2, 0, 50));
+      tot = round1(clamp(nat + cre, 0, 100));
+    }
 
     // 得点に応じたコメント長調整
     const comment = tuneCommentByScore((parsed.comment || "").toString(), tot);
@@ -132,3 +136,4 @@ app.post("/api/eval", async (req, res) => {
     res.status(500).json({ error: "internal_error" });
   }
 });
+
