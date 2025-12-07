@@ -86,17 +86,39 @@ app.post("/api/eval", async (req, res) => {
       return res.json({ nat, cre, tot, comment });
     }
 
+
+
     // 0.1刻み＆範囲
     let nat = round1(clamp(parsed.nat, 0, 50));
     let cre = round1(clamp(parsed.cre, 0, 50));
 
-    ({ nat, cre } = maybeSkewNatCre(nat, cre, 0.35));
+    // ★ 保険：それなりの長さの文章なのに合計が極端に低い場合は底上げ
+    const textLen = (text || "").trim().length;
+    let totRaw = round1(clamp(nat + cre, 0, 100));
+
+    // 条件はお好みで調整可：
+    // - textLen >= 40 : 40文字以上なら「一応ちゃんと書いている」
+    // - totRaw < 20   : 合計20点を最低ラインにする
+    if (textLen >= 40 && totRaw < 20) {
+      const bump = 20 - totRaw; // 合計が20になるように増やす
+      nat = round1(clamp(nat + bump / 2, 0, 50));
+      cre = round1(clamp(cre + bump / 2, 0, 50));
+      totRaw = round1(clamp(nat + cre, 0, 100)); // 一応更新
+    }
+
+    // ここから先は今まで通り
+    // 時々デコボコ（偏り）にする
+    ({ nat, cre } = maybeSkewNatCre(nat, cre, 0.20)); // pは厳しめなら0.15くらい推奨
 
     // 端数散らし（両方 .0/.5 の場合）
     ({ nat, cre } = dequantizeNatCre(nat, cre));
 
     // 合計（0.1刻み）
     let tot = round1(clamp(nat + cre, 0, 100));
+
+    // 5点吸着の回避
+    ({ nat, cre, tot } = breakFiveStepTotal(nat, cre));
+
 
     // 5点吸着の回避
     ({ nat, cre, tot } = breakFiveStepTotal(nat, cre, tot));
