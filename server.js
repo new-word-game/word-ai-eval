@@ -1,5 +1,5 @@
 // ============================================================================
-// Word AI Evaluation Service - 完全改訂版
+// Word AI Evaluation Service - 安定版
 // 造語＋説明文を受け取り、AIによる採点とコメントを返すAPIサーバー
 // 仕様:
 //  - 日本語としてそれなりに書いてあれば一桁続出を防ぐ下限スコア
@@ -83,10 +83,11 @@ app.post("/api/eval", async (req, res) => {
   "comment": "短い日本語のコメント"
 }
 
-注意:
+制約:
 - "nat" と "cre" は数値で返してください（文字列は禁止）。
-- comment は必ず日本語で書いてください。
-- JSON 以外の文章を前後に書くと失敗になります。
+- "comment" は必ず日本語で書いてください。
+- JSON の前後に説明文やコードブロックを付けてはいけません。
+- キーは "nat", "cre", "comment" の3つを必ず含めてください。
 
 【評価対象】
 造語: ${word}
@@ -95,19 +96,23 @@ app.post("/api/eval", async (req, res) => {
 
     // ------------------------------------------------------------------------
     // OpenAI 呼び出し
+    // ここで response_format: json_object を指定して「必ず JSON」にする
     // ------------------------------------------------------------------------
     const completion = await client.chat.completions.create({
       model: "gpt-4o-mini",
       messages: [{ role: "user", content: prompt }],
       temperature: 0.3,
+      response_format: { type: "json_object" },
     });
 
     const aiText = completion.choices?.[0]?.message?.content ?? "";
-    let data = {};
 
+    let data;
     try {
       data = JSON.parse(aiText);
     } catch (e) {
+      console.error("JSON parse error:", e);
+      console.error("AI raw response:", aiText);
       return res.status(500).json({ error: "invalid_json", raw: aiText });
     }
 
@@ -154,6 +159,7 @@ app.post("/api/eval", async (req, res) => {
         cre = round1(clamp(cre + bonus * 0.5, 0, 50));
         appliedGacha = true;
       }
+
       tot = round1(nat + cre);
     }
 
@@ -161,6 +167,7 @@ app.post("/api/eval", async (req, res) => {
     // ★ ガチャ外れ・日本語弱い → 50超は禁止、25〜49 にランダム分散
     // ======================================================================
     const scatterToLowBand = () => {
+      // 25.0〜49.0 のどこかにランダムで落とす（49.9 はそもそも出ない）
       const targetTot = round1(25 + Math.random() * 24); // 25〜49
 
       const base = nat + cre || 1;
@@ -174,10 +181,12 @@ app.post("/api/eval", async (req, res) => {
       tot = round1(nat + cre);
     };
 
+    // 日本語として弱いのに 50 超 → 強制的に 25〜49 に落とす
     if (!goodJapanese && tot > 50) {
       scatterToLowBand();
     }
 
+    // ちゃんとした日本語だがガチャ外れなのに 50 超 → 同じく 25〜49 に落とす
     if (goodJapanese && !appliedGacha && tot > 50) {
       scatterToLowBand();
     }
