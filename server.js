@@ -1,20 +1,6 @@
 // ============================================================================
 // Word AI Evaluation Service - Server
 // ============================================================================
-// 造語と文章を受け取り、AIによる採点とコメントを返すAPIサーバー
-// 
-// 主な機能:
-// - OpenAI APIを使用した自然さ・独創性の採点
-// - 得点に応じた動的なコメント生成（低得点=辛口、高得点=美辞麗句）
-// - スコアの偏り生成と端数処理によるバリエーション確保
-// 
-// エンドポイント:
-// - POST /api/eval : 採点リクエスト { text, word } → { nat, cre, tot, comment }
-// - GET /         : ヘルスチェック
-// ============================================================================
-// 履歴 
-// 25.11.28 cloud 平均点30点に調整,得点に応じたコメント長の動的変更,得点によるトーンの変更
-// ============================================================================
 
 import express from "express";
 import OpenAI from "openai";
@@ -112,16 +98,52 @@ function maybeSkewNatCre(natIn, creIn, p = 0.35) {
   return { nat: clamp(nat, 0, 50), cre: clamp(cre, 0, 50) };
 }
 
+/** ★ 追加：yurugame の api.php へスコア送信（server -> server） */
+async function sendScoreToYurugame({ name, word, meaning, nat, cre, tot }) {
+  // 0点は送らない（保険）
+  if (!tot || Number(tot) <= 0) return;
+
+  const url = "https://yurugame.lovepop.jp/nw/api.php?action=submit";
+
+  // 外部が遅い/落ちてる時に引きずられないようタイムアウト
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 2000);
+
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: name || "匿名",
+        word,
+        meaning,
+        nat,
+        cre,
+        tot,
+      }),
+      signal: controller.signal,
+    });
+
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      console.error("Score send failed:", res.status, body);
+    }
+  } catch (err) {
+    console.error("Score send error:", err?.name || err, err?.message || err);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 // ------------------------- /api/eval -------------------------
 app.post("/api/eval", async (req, res) => {
   try {
-    const { text, word } = req.body || {};
+    // ★ name を受け取っても壊れないように（nwgame.html は今送ってないので未使用でもOK）
+    const { text, word, name } = req.body || {};
     if (!text || !word) {
       return res.status(400).json({ error: "text と word が必要です。" });
     }
 
-    // ★ MODIFIED: 平均30点、得点別トーン変更
     const prompt = `
 あなたは厳格な審査員です。以下の作品を読み、
 1) 自然さ nat（0〜50）
@@ -175,7 +197,7 @@ app.post("/api/eval", async (req, res) => {
 
     const response = await client.chat.completions.create({
       model: "gpt-4o-mini",
-      temperature: 1.25, // バリエーション重視
+      temperature: 1.25,
       response_format: { type: "json_object" },
       messages: [
         { role: "system", content: "日本語で応答。必ずJSONオブジェクトのみを返す。" },
@@ -188,24 +210,29 @@ app.post("/api/eval", async (req, res) => {
     try { parsed = JSON.parse(content); }
     catch { return res.status(502).json({ error: "llm_parse_error", raw: content }); }
 
-    // 0.1刻み＆範囲
     let nat = round1(clamp(parsed.nat, 0, 50));
     let cre = round1(clamp(parsed.cre, 0, 50));
 
-    // 時々デコボコ（偏り）にする
     ({ nat, cre } = maybeSkewNatCre(nat, cre, 0.35));
-
-    // 端数散らし（両方 .0/.5 の場合）
     ({ nat, cre } = dequantizeNatCre(nat, cre));
 
-    // 合計（0.1刻み）
     let tot = round1(clamp(nat + cre, 0, 100));
-
-    // 5点吸着の回避
     ({ nat, cre, tot } = breakFiveStepTotal(nat, cre));
 
-    // ★ MODIFIED: 得点に応じたコメント長調整
     const comment = (parsed.comment || "").toString();
+
+    // ★ 追加：server.js から yurugame の api.php へ送信（レスポンスは止めない）
+    if (tot > 0) {
+      void sendScoreToYurugame({
+        name: name || "匿名",
+        word,
+        meaning: text,
+        nat,
+        cre,
+        tot,
+      });
+    }
+
     return res.json({ nat, cre, tot, comment });
 
   } catch (err) {
